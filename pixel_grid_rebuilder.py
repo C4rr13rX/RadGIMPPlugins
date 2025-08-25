@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rebuild Grid — color-faithful pixel-grid rebuilder (GIMP 3)
+Virtualize Grid — color-faithful pixel-grid rebuilder (GIMP 3)
 (unchanged algorithms; async multithreaded preview with progress bar)
-Default k(px) at launch = 23
+Fix: if Finalize is on and Expand canvas is off, paint a canvas-sized uniform grid
+Default k(px) = 23
 """
 
 import sys, math, statistics, traceback, os, threading, concurrent.futures
@@ -16,7 +17,7 @@ gi.require_version("GimpUi", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gimp, Gegl, Gtk, GdkPixbuf, GimpUi, GLib, Gdk, cairo
 
-PROC_NAME = "python-fu-Rebuild-grid-radiate"
+PROC_NAME = "python-fu-virtualize-grid-radiate"
 
 # ---------------- small utils ----------------
 def idx(x,y,w): return ((y*w)+x)*4
@@ -151,10 +152,6 @@ def _fallback_lines(L, k0):
     return lines
 
 def pick_gridlines_greedy(E, L, k0, slack=0.2):
-    """
-    Greedy picker bounded to valid indices of E (0..len(E)-1).
-    Never reads E[L]; always <= last_index.
-    """
     try:
         k0=max(2,int(k0)); slack=max(0.05,min(0.5,float(slack)))
         Nc=max(2, int(round(L/float(k0)))); M=Nc-1
@@ -294,6 +291,33 @@ def repaint_uniform(colors, kf):
             dst=((r*kf+y)*W)*4; out[dst:dst+W*4]=band
     return out,W,H
 
+def repaint_uniform_to_canvas(colors, w, h):
+    """
+    Paint a uniform grid that exactly fits the current canvas (w,h),
+    regardless of the nominal kf. Uses equal partitions per row/col.
+    """
+    rows=len(colors); cols=len(colors[0]) if rows else 0
+    out=bytearray(w*h*4)
+    if rows<=0 or cols<=0 or w<=0 or h<=0:
+        return out
+    # integer partitions (sum of widths/heights == w/h)
+    x_edges=[(i*w)//cols for i in range(cols+1)]
+    y_edges=[(j*h)//rows for j in range(rows+1)]
+    widths=[x_edges[i+1]-x_edges[i] for i in range(cols)]
+    heights=[y_edges[j+1]-y_edges[j] for j in range(rows)]
+    for r in range(rows):
+        band=bytearray(w*4); off=0
+        for c in range(cols):
+            ww = widths[c]
+            if ww<=0: continue
+            R,G,B = colors[r][c]
+            block=bytes((R,G,B,255))*ww
+            band[off:off+ww*4]=block; off+=ww*4
+        y0=y_edges[r]; y1=y_edges[r+1]
+        for y in range(y0,y1):
+            dst=idx(0,y,w); out[dst:dst+w*4]=band
+    return out
+
 # ---------- defaults ----------
 def auto_defaults(src,w,h):
     kmax=min(128, max(8, min(w,h)//4))
@@ -309,7 +333,7 @@ def auto_defaults(src,w,h):
 # ---------- preview dialog ----------
 class Preview(Gtk.Dialog):
     def __init__(self, src,w,h,k0,energies):
-        super().__init__(title="Rebuild Grid — Preview",
+        super().__init__(title="Virtualize Grid — Preview",
                          flags=Gtk.DialogFlags.MODAL,
                          buttons=(Gtk.STOCK_CANCEL,Gtk.ResponseType.CANCEL,
                                   Gtk.STOCK_APPLY, Gtk.ResponseType.OK))
@@ -426,7 +450,6 @@ class Preview(Gtk.Dialog):
         self._worker = None
 
     def _start_render(self):
-        # new job id; cancel previous
         self._cancel_current()
         self._cancel_event = threading.Event()
         job_id = self._job_id = self._job_id + 1
@@ -437,7 +460,6 @@ class Preview(Gtk.Dialog):
         def worker():
             try:
                 if self._cancel_event.is_set(): return
-                # 1) fuse energies
                 self._progress(0.05, "Fusing energy…")
                 rad=max(1,int(round(self.k*0.25)))
                 Ex = normalize([0.65*s+0.35*a for s,a in zip(self.Ex_s,self.Ex_a)])
@@ -445,7 +467,6 @@ class Preview(Gtk.Dialog):
                 Ex = smooth_ma(Ex,rad); Ey = smooth_ma(Ey,rad)
                 if self._cancel_event.is_set(): return
 
-                # 2) grid
                 self._progress(0.15, "Picking grid…")
                 Gx=pick_gridlines_greedy(Ex,self.w,self.k,0.20)
                 Gy=pick_gridlines_greedy(Ey,self.h,self.k,0.20)
@@ -455,31 +476,23 @@ class Preview(Gtk.Dialog):
                 if Gy[-1]!=self.h: Gy=Gy+[self.h]
                 if self._cancel_event.is_set(): return
 
-                # 3) sample tiles (multithread rows)
                 workers = max(2, min(4, (os.cpu_count() or 2)))
                 colors = analyze_tiles_parallel(self.src,self.w,self.h,Gx,Gy,self.coh,
                                                 workers, self._cancel_event, self._progress)
                 if self._cancel_event.is_set(): return
 
-                # 4) edge cleanup
                 self._progress(0.85, "Edge cleanup…")
                 colors = snap_edges(colors, self.cln)
                 if self._cancel_event.is_set(): return
 
-                # 5) repaint
                 self._progress(0.92, "Painting…")
-                if self.finalize:
-                    dx=[Gx[i+1]-Gx[i] for i in range(len(Gx)-1)]
-                    dy=[Gy[i+1]-Gy[i] for i in range(len(Gy)-1)]
-                    kf=max(2,int(round((statistics.median(dx)+statistics.median(dy))/2.0)))
-                    rb,Wf,Hf = repaint_uniform(colors,kf)
-                    pix = GdkPixbuf.Pixbuf.new_from_data(bytes(rb), GdkPixbuf.Colorspace.RGB, True,8,Wf,Hf,Wf*4)
-                else:
-                    rb = repaint_irregular(colors,Gx,Gy,self.w,self.h)
-                    pix = GdkPixbuf.Pixbuf.new_from_data(bytes(rb), GdkPixbuf.Colorspace.RGB, True,8,self.w,self.h,self.w*4)
+                dx=[Gx[i+1]-Gx[i] for i in range(len(Gx)-1)]
+                dy=[Gy[i+1]-Gy[i] for i in range(len(Gy)-1)]
+                kf=max(2,int(round((statistics.median(dx)+statistics.median(dy))/2.0)))
+                rb,Wf,Hf = repaint_uniform(colors,kf)  # preview uses uniform true size
+                pix = GdkPixbuf.Pixbuf.new_from_data(bytes(rb), GdkPixbuf.Colorspace.RGB, True,8,Wf,Hf,Wf*4)
 
                 if self._cancel_event.is_set(): return
-                # deliver to UI
                 def deliver():
                     if self._job_id != job_id: return False
                     self.pb = pix
@@ -553,7 +566,7 @@ def run(proc, run_mode, image, drawables, config, data):
         if len(drawables)!=1 or not isinstance(drawables[0], Gimp.Layer):
             return proc.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, GLib.Error("Select exactly one layer."))
         layer=drawables[0]; w,h=layer.get_width(), layer.get_height()
-        Gegl.init(None); GimpUi.init("Rebuild-grid")
+        Gegl.init(None); GimpUi.init("virtualize-grid")
 
         # STRAIGHT-ALPHA read
         buf=layer.get_buffer()
@@ -561,16 +574,16 @@ def run(proc, run_mode, image, drawables, config, data):
         raw = buf.get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP)
         src = memoryview(bytearray(raw))
 
-        # Keep auto energy analysis; but override initial k to 23 by request
+        # energies kept for consistency; initial k forced to 23 by request
         _k_auto, energies = auto_defaults(src,w,h)
-        k0 = 23  # user-preferred default; still clamped by UI
+        k0 = 23  # preferred default
 
         dlg=Preview(src,w,h,k0,energies)
         resp=dlg.run(); p=dlg.params(); dlg.destroy()
         if resp!=Gtk.ResponseType.OK:
             return proc.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
 
-        # Apply (parallel sampling for speed, same math)
+        # Apply
         Ex_s,Ey_s,Ex_a,Ey_a = energies
         rad=max(1,int(round(p["k"]*0.25)))
         Ex=smooth_ma(normalize([0.65*s+0.35*a for s,a in zip(Ex_s,Ex_a)]),rad)
@@ -594,9 +607,12 @@ def run(proc, run_mode, image, drawables, config, data):
                 dx=[Gx[i+1]-Gx[i] for i in range(len(Gx)-1)]
                 dy=[Gy[i+1]-Gy[i] for i in range(len(Gy)-1)]
                 kf=max(2,int(round((statistics.median(dx)+statistics.median(dy))/2.0)))
-                out,Wf,Hf = repaint_uniform(colors,kf)
                 if p["expand"]:
+                    out,Wf,Hf = repaint_uniform(colors,kf)
                     image.resize(Wf,Hf,0,0); w,h=Wf,Hf
+                else:
+                    # canvas-sized uniform repaint to avoid blank layer
+                    out = repaint_uniform_to_canvas(colors, w, h)
             else:
                 out = repaint_irregular(colors,Gx,Gy,w,h)
 
@@ -613,7 +629,7 @@ def run(proc, run_mode, image, drawables, config, data):
 
         return proc.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
     except Exception as e:
-        Gimp.message("Rebuild Grid error:\n"+ "".join(traceback.format_exception_only(type(e),e)))
+        Gimp.message("Virtualize Grid error:\n"+ "".join(traceback.format_exception_only(type(e),e)))
         return proc.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(e)))
 
 class Plugin(Gimp.PlugIn):
@@ -622,7 +638,7 @@ class Plugin(Gimp.PlugIn):
         if name!=PROC_NAME: return None
         p=Gimp.ImageProcedure.new(self,name,Gimp.PDBProcType.PLUGIN, run, None)
         p.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
-        p.set_menu_label("Rebuild Grid…"); p.add_menu_path("<Image>/Filters/Pixel Art")
+        p.set_menu_label("Virtualize Grid…"); p.add_menu_path("<Image>/Filters/Pixel Art")
         p.set_documentation("Rebuild blown-up pixel art on an adaptive lattice with palette-preserving colors.", None, None)
         p.set_attribution("Adam + GPT-5 Thinking","MIT","2025")
         return p

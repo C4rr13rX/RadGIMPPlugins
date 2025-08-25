@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Virtualize Grid — color-faithful pixel-grid rebuilder (GIMP 3)
+Rebuild Grid — color-faithful pixel-grid rebuilder (GIMP 3)
 (unchanged algorithms; async multithreaded preview with progress bar)
 Fix: if Finalize is on and Expand canvas is off, paint a canvas-sized uniform grid
 Default k(px) = 23
@@ -17,7 +17,7 @@ gi.require_version("GimpUi", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gimp, Gegl, Gtk, GdkPixbuf, GimpUi, GLib, Gdk, cairo
 
-PROC_NAME = "python-fu-virtualize-grid-radiate"
+PROC_NAME = "python-fu-Rebuild-grid-radiate"
 
 # ---------------- small utils ----------------
 def idx(x,y,w): return ((y*w)+x)*4
@@ -333,7 +333,7 @@ def auto_defaults(src,w,h):
 # ---------- preview dialog ----------
 class Preview(Gtk.Dialog):
     def __init__(self, src,w,h,k0,energies):
-        super().__init__(title="Virtualize Grid — Preview",
+        super().__init__(title="Rebuild Grid — Preview",
                          flags=Gtk.DialogFlags.MODAL,
                          buttons=(Gtk.STOCK_CANCEL,Gtk.ResponseType.CANCEL,
                                   Gtk.STOCK_APPLY, Gtk.ResponseType.OK))
@@ -566,7 +566,7 @@ def run(proc, run_mode, image, drawables, config, data):
         if len(drawables)!=1 or not isinstance(drawables[0], Gimp.Layer):
             return proc.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, GLib.Error("Select exactly one layer."))
         layer=drawables[0]; w,h=layer.get_width(), layer.get_height()
-        Gegl.init(None); GimpUi.init("virtualize-grid")
+        Gegl.init(None); GimpUi.init("Rebuild-grid")
 
         # STRAIGHT-ALPHA read
         buf=layer.get_buffer()
@@ -629,7 +629,7 @@ def run(proc, run_mode, image, drawables, config, data):
 
         return proc.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
     except Exception as e:
-        Gimp.message("Virtualize Grid error:\n"+ "".join(traceback.format_exception_only(type(e),e)))
+        Gimp.message("Rebuild Grid error:\n"+ "".join(traceback.format_exception_only(type(e),e)))
         return proc.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(e)))
 
 class Plugin(Gimp.PlugIn):
@@ -638,7 +638,7 @@ class Plugin(Gimp.PlugIn):
         if name!=PROC_NAME: return None
         p=Gimp.ImageProcedure.new(self,name,Gimp.PDBProcType.PLUGIN, run, None)
         p.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
-        p.set_menu_label("Virtualize Grid…"); p.add_menu_path("<Image>/Filters/Pixel Art")
+        p.set_menu_label("Rebuild Grid…"); p.add_menu_path("<Image>/Filters/Pixel Art")
         p.set_documentation("Rebuild blown-up pixel art on an adaptive lattice with palette-preserving colors.", None, None)
         p.set_attribution("Adam + GPT-5 Thinking","MIT","2025")
         return p
